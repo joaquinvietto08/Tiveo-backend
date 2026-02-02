@@ -104,16 +104,19 @@ exports.paymentWebhook = functions.https.onRequest((req, res) => {
 
       const paymentDocId = externalReference || paymentId;
       const paymentRef = db.collection("payments").doc(paymentDocId);
-      const paymentSnap = await paymentRef.get();
+      await db.runTransaction(async (transaction) => {
+        const paymentSnap = await transaction.get(paymentRef);
 
-      if (!paymentSnap.exists) {
-        console.warn("⚠️ No se encontró documento de pago", {
-          paymentDocId,
-          paymentId,
-        });
-      } else {
+        if (!paymentSnap.exists) {
+          console.warn("⚠️ No se encontró documento de pago", {
+            paymentDocId,
+            paymentId,
+          });
+          return;
+        }
+
         const paymentDoc = paymentSnap.data();
-        await paymentRef.update({
+        transaction.update(paymentRef, {
           status: appStatus,
           mpStatus: status,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -121,10 +124,22 @@ exports.paymentWebhook = functions.https.onRequest((req, res) => {
         });
 
         if (paymentDoc?.activityId) {
-          await db.collection("activities").doc(paymentDoc.activityId).update({
+          const activityUpdate = {
             paymentStatus: appStatus,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          };
+
+          // 🔹 Establecer warranty cuando el pago se aprueba
+          if (appStatus === "paid") {
+            const warrantyDate = new Date();
+            warrantyDate.setDate(warrantyDate.getDate() + 15);
+            activityUpdate.warranty = admin.firestore.Timestamp.fromDate(warrantyDate);
+          }
+
+          transaction.update(
+            db.collection("activities").doc(paymentDoc.activityId),
+            activityUpdate
+          );
         }
 
         if (paymentDoc?.workerId) {
@@ -137,12 +152,13 @@ exports.paymentWebhook = functions.https.onRequest((req, res) => {
             workerUpdate.completedJobs = admin.firestore.FieldValue.increment(1);
           }
 
-          await db
-            .collection("workers")
-            .doc(paymentDoc.workerId)
-            .set(workerUpdate, { merge: true });
+          transaction.set(
+            db.collection("workers").doc(paymentDoc.workerId),
+            workerUpdate,
+            { merge: true }
+          );
         }
-      }
+      });
 
       return res.status(200).json({ ok: true });
     } catch (error) {

@@ -21,7 +21,7 @@ exports.createActivityFromRequest = functions.https.onRequest((req, res) => {
 
     try {
       const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-      const { requestId, newStatus } = body;
+      const { requestId, newStatus, postulationId } = body;
 
       if (!requestId || !newStatus) {
         return res.status(400).json({
@@ -39,12 +39,48 @@ exports.createActivityFromRequest = functions.https.onRequest((req, res) => {
 
       const requestData = requestSnap.data();
 
-      await db.collection("activities").doc(requestId).set({
+      // 🔹 Obtener datos de la postulación
+      let postulationData = {};
+      if (postulationId) {
+        const postulationRef = db.collection("postulations").doc(postulationId);
+        const postulationSnap = await postulationRef.get();
+
+        if (postulationSnap.exists) {
+          postulationData = postulationSnap.data();
+        }
+      }
+
+      // 🔹 Extraer datos de la postulación y del worker
+      // Si hay worker en el body (trabajo directo), usarlo; si no, usar el de la postulación
+      const workerFromBody = body.worker;
+      const workerFromPostulation = postulationData.worker;
+      const workerData = workerFromBody || workerFromPostulation;
+
+      if (!workerData || !workerData.uid) {
+        return res.status(400).json({
+          success: false,
+          message: "Se requieren los datos del trabajador.",
+        });
+      }
+
+      const activityData = {
         ...requestData,
+        // Datos de la postulación (puede estar vacío en trabajos directos)
+        budget: postulationData.budget || null,
+        // Datos del worker (desde body o postulación)
+        worker: {
+          uid: workerData.uid,
+          workerName: workerData.workerName || "",
+          firstName: workerData.firstName || "",
+          lastName: workerData.lastName || "",
+          photoURL: workerData.photoURL || null,
+        },
         status: newStatus,
         paymentStatus: "pending",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+      };
+
+      await db.collection("activities").doc(requestId).set(activityData);
 
       await requestRef.update({ status: "closed" });
 
