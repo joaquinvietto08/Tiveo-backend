@@ -167,3 +167,73 @@ exports.paymentWebhook = functions.https.onRequest((req, res) => {
     }
   });
 });
+
+// ---------------------------
+// Confirmar pago en efectivo (misma lógica que webhook MP: payment + activity + warranty + worker)
+// ---------------------------
+exports.confirmPayment = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+    try {
+      const { paymentId, activityId, workerId, method = "efectivo" } =
+        req.body || {};
+
+      if (!paymentId) {
+        return res.status(400).json({ error: "Missing paymentId" });
+      }
+
+      const paymentRef = db.collection("payments").doc(paymentId);
+      let alreadyPaid = false;
+
+      await db.runTransaction(async (transaction) => {
+        const paymentSnap = await transaction.get(paymentRef);
+        if (!paymentSnap.exists) {
+          throw new Error("Pago no encontrado");
+        }
+        const paymentDoc = paymentSnap.data();
+        if (paymentDoc.status === "paid") {
+          alreadyPaid = true;
+          return;
+        }
+
+        transaction.update(paymentRef, {
+          status: "paid",
+          method: method || "efectivo",
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        const actId = activityId || paymentDoc.activityId;
+        if (actId) {
+          const warrantyDate = new Date();
+          warrantyDate.setDate(warrantyDate.getDate() + 15);
+          transaction.update(db.collection("activities").doc(actId), {
+            paymentStatus: "paid",
+            warranty: admin.firestore.Timestamp.fromDate(warrantyDate),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        const wId = workerId || paymentDoc.workerId;
+        if (wId) {
+          transaction.set(
+            db.collection("workers").doc(wId),
+            {
+              completedJobs: admin.firestore.FieldValue.increment(1),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+      });
+
+      return res.status(200).json({ ok: true, alreadyPaid: !!alreadyPaid });
+    } catch (error) {
+      console.error("❌ Error en confirmPayment:", error);
+      const status = error.message === "Pago no encontrado" ? 404 : 500;
+      return res.status(status).json({ error: error.message });
+    }
+  });
+});

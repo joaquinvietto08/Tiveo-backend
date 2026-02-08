@@ -46,8 +46,10 @@ exports.rateActivity = functions.https.onRequest((req, res) => {
         }
 
         const activityData = activitySnap.data() || {};
+        const worker =
+          activityData.worker || {};
         const workerId =
-          activityData.worker?.workerId;
+          worker.workerId || worker.uid || worker.id;
 
         if (!workerId) {
           throw new Error("La activity no tiene worker asociado.");
